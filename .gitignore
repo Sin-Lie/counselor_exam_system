@@ -1,0 +1,76 @@
+# ==================== 环境变量（包含密码和密钥，禁止提交） ====================
+.env
+.env.*
+!.env.prod.example
+.env.prod
+
+# ==================== Python ====================
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+.venv
+venv
+env/
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+
+# ==================== Node ====================
+node_modules/
+frontend/node_modules/
+
+# ==================== 日志 ====================
+logs/
+*.log
+
+# ==================== 数据库备份（禁止提交） ====================
+*.sql
+*.sqlite3
+*.db
+*.csv
+*.dump
+
+# ==================== Docker ====================
+.docker/
+docker-compose.override.yml
+
+# ==================== 测试与覆盖率 ====================
+.coverage
+.coverage.*
+coverage/
+htmlcov/
+.pytest_cache/
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# ==================== 系统文件 ====================
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+*.bak
+*.orig
+.Directory
+
+# ==================== IDE ====================
+.idea
+.vscode
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# ==================== 项目特定 ====================
+# Git Worktree 隔离目录
+.worktrees/
+
+
+
+1.py

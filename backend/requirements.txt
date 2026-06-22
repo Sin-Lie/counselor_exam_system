@@ -1,0 +1,42 @@
+# 辅导员考试系统 - 依赖包清单
+# 版本号基于2024年主流稳定版本
+
+# python >= 3.11
+
+# Django核心框架
+Django==4.2.16
+
+# Django REST Framework - RESTful API开发
+djangorestframework==3.15.2
+
+# Redis - 缓存和实时功能（考试计时、防作弊）
+redis==5.2.0
+
+# JWT认证
+PyJWT==2.10.1
+
+# Excel处理
+openpyxl==3.1.5
+
+# MySQL数据库驱动
+mysqlclient==2.2.1
+
+# 生产环境服务器
+gunicorn==21.2.0
+
+# Python图像处理（可选，用于处理图片）
+Pillow==10.4.0
+
+# 跨域请求处理（开发环境）
+django-cors-headers==4.4.0
+
+# 自动加载环境变量
+python-dotenv==1.0.1
+
+# HTTP 客户端（AI 批改调用大模型 API）
+httpx==0.28.1
+
+# 代码质量工具（可选）
+# flake8==7.1.0
+# black==24.4.0
+# isort==5.13.2

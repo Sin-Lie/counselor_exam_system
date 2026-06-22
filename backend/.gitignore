@@ -1,0 +1,71 @@
+# Django项目.gitignore文件
+
+# 虚拟环境目录
+venv/
+env/
+ENV/
+env.local/
+env.development.local/
+env.production.local/
+
+# 数据库文件
+*.db
+*.sqlite3
+*.sqlite
+
+# 媒体文件
+media/
+
+# 静态文件（编译后的）
+staticfiles/
+
+# 日志文件
+logs/
+*.log
+
+# 编译文件
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 环境变量文件
+.env
+.env.local
+.env.*.local
+
+# IDE相关文件
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 操作系统相关文件
+.DS_Store
+Thumbs.db
+
+# 测试相关
+htmlcov/
+.coverage
+.coverage.*
+.cache
+
+# 部署相关
+*.egg-info/
+dist/
+build/
+
+# 其他临时文件
+*.tmp
+*.temp
+.tmp/
+.temp/
+
+# 工作树
+.worktrees/
+
+
+# 文档（排除自动生成的README，保留需求文档等）
+README.md
+
+docs/

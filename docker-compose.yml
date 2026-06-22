@@ -1,0 +1,110 @@
+# 辅导员考试系统 - Docker Compose 生产部署
+# 使用方式:
+#   1. 修改 .env.prod 中的密码和密钥
+#   2. docker-compose --env-file .env.prod up -d
+#   3. 访问 http://服务器IP
+
+services:
+  # ===== MySQL 数据库 =====
+  mysql:
+    image: mysql:8.0
+    container_name: counselor_mysql
+    restart: always
+    env_file:
+      - .env.prod
+    ports:
+      - "3307:3306"  # 主机 3307 映射到容器 3306（避免与主机 MySQL 冲突）
+    volumes:
+      - mysql_data:/var/lib/mysql
+    command: >
+      --character-set-server=utf8mb4
+      --collation-server=utf8mb4_unicode_ci
+      --default-authentication-plugin=mysql_native_password
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ===== Redis 缓存 =====
+  redis:
+    image: redis:7-alpine
+    container_name: counselor_redis
+    restart: always
+    env_file:
+      - .env.prod
+    command: redis-server --requirepass "StrongUserPassword123"
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ===== Django 后端 =====
+  backend:
+    build: ./backend
+    image: counselor-backend:latest
+    container_name: counselor_backend
+    restart: always
+    env_file:
+      - .env.prod
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - /opt/photo:/opt/photo
+      - backend_media:/app/media
+      - backend_logs:/app/logs
+      - backend_static:/app/staticfiles
+    expose:
+      - "8000"
+
+  # ===== Nginx 前端 + 反向代理 =====
+  nginx:
+    build: ./frontend
+    image: counselor-frontend:latest
+    container_name: counselor_nginx
+    restart: always
+    env_file:
+      - .env.prod
+    depends_on:
+      - backend
+    ports:
+      - "80:80"
+    volumes:
+      - backend_media:/usr/share/nginx/html/media:ro
+      - backend_static:/usr/share/nginx/html/static:ro
+      - /opt/photo:/opt/photo
+    environment:
+      - TZ=Asia/Shanghai
+
+volumes:
+  mysql_data:
+    name: counselor_mysql_data
+  redis_data:
+    name: counselor_redis_data
+  backend_media:
+    name: counselor_media
+  backend_logs:
+    name: counselor_logs
+  backend_static:
+    name: counselor_static
+
+
+
+
+
+
+
+
+
+
+
+
+
