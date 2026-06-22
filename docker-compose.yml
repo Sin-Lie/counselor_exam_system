@@ -1,4 +1,4 @@
-# 辅导员考试系统 - Docker Compose 生产部署
+# 辅导员考试系统 - Docker Compose 生产部署示例
 # 使用方式:
 #   1. 修改 .env.prod 中的密码和密钥
 #   2. docker-compose --env-file .env.prod up -d
