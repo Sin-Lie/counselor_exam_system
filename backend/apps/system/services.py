@@ -649,7 +649,7 @@ def get_exam_list_for_admin(page=1, size=10):
     管理员/超管考试列表（含统计信息）
     返回所有考试，按发布日期倒序，每项包含考生总数、已交卷数、已批改数
     """
-    exams = Exam.objects.all().order_by('-release_date')
+    exams = Exam.objects.all().order_by('-release_date', '-id')
     total = exams.count()
     pages = max(1, math.ceil(total / size))
     page_exams = exams[(page - 1) * size: page * size]
@@ -1105,6 +1105,7 @@ def set_exam_status(exam_id, status, operator_id=None):
     return True, {}
 
 
+@transaction.atomic
 def edit_exam(exam_id, exam_name=None, release_time=None, exam_start=None,
               exam_duration=None, questions=None, operator_id=None, ai_grade_enabled=None,
               generate_mode=None, student_count=None):
@@ -1113,7 +1114,7 @@ def edit_exam(exam_id, exam_name=None, release_time=None, exam_start=None,
     若修改了questions配置 / 出题模式 / 学生人数，重新校验并重建所有考生的题目
     """
     try:
-        exam = Exam.objects.get(id=exam_id)
+        exam = Exam.objects.select_for_update().get(id=exam_id)
     except Exam.DoesNotExist:
         return False, (404, "考试不存在")
 
@@ -1169,41 +1170,41 @@ def edit_exam(exam_id, exam_name=None, release_time=None, exam_start=None,
         updates['question_config'] = config
         need_regenerate = True
 
-    # 先保存考试元数据
-    if updates:
-        for k, v in updates.items():
-            setattr(exam, k, v)
-        exam.save(update_fields=list(updates.keys()))
-
-    # 题型配置变更时：在事务中完成校验+重建，避免竞态条件
     if need_regenerate:
-        try:
-            with transaction.atomic():
-                # 校验放在事务内，确保校验和生成之间数据一致性
+        papers = ExamPaper.objects.filter(exam=exam)
+        if (
+            exam.status not in (ExamStatus.NOT_PUBLISHED, ExamStatus.IN_PROGRESS)
+            or timezone.now() >= exam.start_time
+            or timezone.now() >= updates.get('start_time', exam.start_time)
+            or papers.exclude(status=ExamPaper.Status.NOT_STARTED).exists()
+            or papers.filter(Q(started_at__isnull=False) | Q(submitted_at__isnull=False)).exists()
+            or ExamAnswer.objects.filter(question__exam=exam).exists()
+        ):
+            return False, (409, "仅可在考试开始前为未作答的考试重新组卷")
+
+    try:
+        with transaction.atomic():
+            if need_regenerate:
                 is_valid, validation_errors = _validate_exam_generation(effective_questions)
                 if not is_valid:
-                    error_detail = "；".join(validation_errors)
-                    raise ValueError(error_detail)
-                # 删除该考试下所有旧答案
-                old_question_ids = list(
-                    ExamQuestion.objects.filter(exam_id=exam_id).values_list('id', flat=True)
-                )
-                if old_question_ids:
-                    ExamAnswer.objects.filter(question_id__in=old_question_ids).delete()
-                ExamQuestion.objects.filter(exam_id=exam_id).delete()
-                # 清除批改发布记录（试卷已重建，需重新批改和发布）
-                GradePublish.objects.filter(exam_id=exam_id).delete()
-                # 重置所有考生的考试状态为未开始
-                ExamPaper.objects.filter(exam_id=exam_id).update(status=ExamPaper.Status.NOT_STARTED)
-                # 重新生成题目
+                    raise ValueError("；".join(validation_errors))
+
+            if updates:
+                for field, value in updates.items():
+                    setattr(exam, field, value)
+                exam.save(update_fields=updates)
+
+            if need_regenerate:
+                ExamQuestion.objects.filter(exam=exam).delete()
+                GradePublish.objects.filter(exam=exam).delete()
                 _generate_exam_papers(exam)
-        except ValueError as e:
-            return False, (4005, f"试卷重新生成失败：{str(e)}")
-        except Exception as e:
-            return False, (500, f"编辑考试失败：{str(e)}")
+    except ValueError as e:
+        return False, (4005, f"试卷重新生成失败：{str(e)}")
+    except Exception as e:
+        return False, (500, f"编辑考试失败：{str(e)}")
 
     if updates and operator_id:
-        _write_log(operator_id, '考试管理', '编辑考试', str(exam_id))
+        transaction.on_commit(lambda: _write_log(operator_id, '考试管理', '编辑考试', str(exam_id)))
 
     return True, {}
 
@@ -1420,20 +1421,15 @@ def get_user_status_list(exam_id, page=1, size=10, status=None, keyword=''):
 
         # 查询已批改的主观题ID（score 不为空）
         all_essay_ids = [qid for ids in user_essay_qs.values() for qid in ids]
-        if all_essay_ids:
-            graded_ids = set(
-                ExamAnswer.objects.filter(
-                    question_id__in=all_essay_ids,
-                    score__isnull=False,
-                ).values_list('question_id', flat=True)
-            )
-            # 每位考生的主观题全部已批改 → 标记为已批改
-            for uid, qids in user_essay_qs.items():
-                if qids.issubset(graded_ids):
-                    fully_graded_user_ids.add(uid)
-        else:
-            # 没有主观题 → 已交卷即视为已批改
-            fully_graded_user_ids = submitted_user_ids
+        graded_ids = set(
+            ExamAnswer.objects.filter(
+                question_id__in=all_essay_ids,
+                score__isnull=False,
+            ).values_list('question_id', flat=True)
+        )
+        fully_graded_user_ids = {
+            uid for uid in submitted_user_ids if user_essay_qs[uid].issubset(graded_ids)
+        }
 
     return True, {
         'list': [{

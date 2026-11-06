@@ -34,6 +34,9 @@ urlpatterns = [
     # 🆕 超管试卷检查（试卷生成后、开考前，人工校验所有考生试卷是否正确）
     path('paper-review/<int:paper_id>/', views.PaperReviewView.as_view(), name='paper_review'),
 
+    path('paper-review/<int:paper_id>/questions/<int:question_id>/',
+         views.PaperQuestionEditView.as_view(), name='paper_question_edit'),
+
     # 🆕 预加载试卷图片（考前10分钟入场时调用，base64编码返回所有选项图片供前端缓存）
     path('preload-images/<int:paper_id>/', views.PreloadImagesView.as_view(), name='preload_images'),
 

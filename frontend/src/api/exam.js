@@ -126,12 +126,20 @@ export function getExamUserStatus(examId, params) {
 /**
  * 超管试卷检查接口
  * @param {string} paperId - 试卷ID
- * @returns {Promise} 返回试卷详情（不含答案），包含paper_id、teacher_name、teacher_gh、questions
+ * @returns {Promise} 返回试卷题目、标准答案及是否允许编辑
  */
 export function getPaperReview(paperId) {
   return request({
     url: `/exam/paper-review/${paperId}/`,
     method: 'get',
+  })
+}
+
+export function updatePaperQuestion(paperId, questionId, data) {
+  return request({
+    url: `/exam/paper-review/${paperId}/questions/${questionId}/`,
+    method: 'patch',
+    data,
   })
 }
 

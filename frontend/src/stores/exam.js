@@ -376,18 +376,16 @@ export const useExamStore = defineStore('exam', () => {
    * 考试开始前调用，将试卷中所有题目选项的图片 base64 解码后缓存为 Blob URL
    * @param {string} paperId - 试卷ID
    */
-  async function preloadExamImages(paperId) {
+  async function preloadExamImages(paperId, force = false) {
     // 如果该试卷已预加载过，跳过重复请求
-    if (preloadedPaperIds.value.has(paperId)) {
+    if (!force && preloadedPaperIds.value.has(paperId)) {
       console.log(`试卷 ${paperId} 图片已预加载，跳过`)
       return
     }
     try {
       const res = await preloadImagesAPI(paperId) // 调用预加载接口
-      console.log('预加载接口原始返回:', res) // 调试日志
       // 请求拦截器已扁平化返回，images 在顶层
       const images = res.images
-      console.log('images 数据:', images) // 调试日志
       if (!images || images.length === 0) {
         // 无图片也标记为已预加载，避免后续重复请求
         preloadedPaperIds.value.add(paperId)
@@ -402,9 +400,9 @@ export const useExamStore = defineStore('exam', () => {
         const key = `${img.question_id}_${img.option_key}` // 缓存 key：题目ID_选项键
         // 释放旧 URL（如果存在）
         if (examImages.value.has(key)) {
-          URL.revokeObjectURL(examImages.value.get(key))
+          URL.revokeObjectURL(examImages.value.get(key).url)
         }
-        examImages.value.set(key, blobUrl) // 缓存新的 Blob URL
+        examImages.value.set(key, { url: blobUrl, source: img.source })
       }
       // 标记该试卷已预加载完成
       preloadedPaperIds.value.add(paperId)
@@ -420,9 +418,9 @@ export const useExamStore = defineStore('exam', () => {
    * @param {string} optionKey - 选项键（A/B/C/D）
    * @returns {string|null} 返回缓存的 Blob URL，未缓存返回 null
    */
-  function getCachedImage(questionId, optionKey) {
-    const key = `${questionId}_${optionKey}` // 构造缓存 key
-    return examImages.value.get(key) || null // 返回缓存的 Blob URL
+  function getCachedImage(questionId, optionKey, source) {
+    const image = examImages.value.get(`${questionId}_${optionKey}`)
+    return image && image.source === source ? image.url : null
   }
 
   /**
@@ -430,8 +428,8 @@ export const useExamStore = defineStore('exam', () => {
    * 考试结束后调用，释放浏览器内存
    */
   function cleanupImages() {
-    examImages.value.forEach((blobUrl) => {
-      URL.revokeObjectURL(blobUrl) // 释放 Blob URL
+    examImages.value.forEach(({ url }) => {
+      URL.revokeObjectURL(url)
     })
     examImages.value.clear() // 清空缓存 Map
     preloadedPaperIds.value.clear() // 清空已预加载标记

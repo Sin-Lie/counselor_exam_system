@@ -8,6 +8,8 @@ import os
 import random
 import re
 from datetime import timedelta
+from hashlib import sha256
+from pathlib import Path
 from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
@@ -291,9 +293,11 @@ def _normalize_multi_answer(answer):
     """
     if not answer:
         return ''
-    parts = [p.strip().upper() for p in answer.replace('，', ',').split(',') if p.strip()]
-    parts.sort()
-    return ','.join(parts)
+    answer = answer.strip().upper().replace('，', ',')
+    if re.fullmatch(r'[A-D]+', answer):
+        return ','.join(sorted(answer))
+    parts = [part.strip() for part in answer.split(',') if part.strip()]
+    return ','.join(sorted(parts))
 
 
 def _validate_answer_format(user_answer, question_type):
@@ -955,10 +959,10 @@ def _build_student_groups(questions_qs, answers_map):
             item['options'] = _parse_options(q.options)
         groups[sid]['questions'].append(item)
 
-    result = sorted(groups.values(), key=lambda g: g['student_xid'])
-    return result
+    return sorted(groups.values(), key=lambda g: (g['student_xid'] is None, g['student_xid']))
 
 
+@transaction.atomic
 def enter_exam(exam_id, user_id, user_display_name):
     """
     进入考试（支持断线恢复）
@@ -981,9 +985,9 @@ def enter_exam(exam_id, user_id, user_display_name):
         by_student 模式: {paper_id, is_resumed, generate_mode, student_count, question_groups: [...], exam_status}
         error: (code, msg) 如 (4032, "不在考试时间内或考试已关闭")
     """
-    # 1. 校验考试存在
+    # 与考前修改试卷、重新组卷使用相同的考试锁，避免入场时读取到旧题。
     try:
-        exam = Exam.objects.get(id=exam_id)
+        exam = Exam.objects.select_for_update().get(id=exam_id)
     except Exam.DoesNotExist:
         return False, (404, "考试不存在")
 
@@ -1466,6 +1470,102 @@ def _build_essay_reference_answer(question):
     return result
 
 
+def _paper_editable(paper):
+    return (
+        paper.exam.status in (ExamStatus.NOT_PUBLISHED, ExamStatus.IN_PROGRESS)
+        and timezone.now() < paper.exam.start_time
+        and paper.status == ExamPaper.Status.NOT_STARTED
+        and paper.started_at is None
+        and paper.submitted_at is None
+    )
+
+
+def _review_question(question):
+    options = _parse_options(question.options)
+    correct_answer = question.correct_answer or ''
+    if question.question_type == 'essay':
+        correct_answer = _build_essay_reference_answer(question)
+
+    snapshot = json.dumps(
+        [question.question_text, question.question_type, options, question.correct_answer],
+        sort_keys=True,
+        ensure_ascii=False,
+    )
+    item = {
+        'question_id': question.id,
+        'title': question.question_text,
+        'question_type': question.question_type,
+        'score': question.score,
+        'correct_answer': correct_answer,
+        'revision': sha256(snapshot.encode('utf-8')).hexdigest(),
+    }
+    if options:
+        item['options'] = options
+    return item
+
+
+@transaction.atomic
+def edit_paper_question(paper_id, question_id, operator_id, changes):
+    # 先锁考试，再锁考生试卷，与整场重新组卷的锁顺序一致。
+    exam_id = ExamPaper.objects.filter(id=paper_id).values_list('exam_id', flat=True).first()
+    exam = Exam.objects.select_for_update().filter(id=exam_id).first()
+    paper = ExamPaper.objects.select_for_update().filter(id=paper_id, exam_id=exam_id).first()
+    if exam is None or paper is None:
+        return False, (404, '试卷不存在')
+    paper.exam = exam
+    if not _paper_editable(paper):
+        return False, (409, '仅可在考试开始前修改未作答的试卷')
+
+    question = ExamQuestion.objects.filter(id=question_id, exam=exam, user_id=paper.user_id).first()
+    if question is None:
+        return False, (404, '该题目不属于这份试卷')
+    if ExamAnswer.objects.filter(question__exam=exam, question__user_id=paper.user_id).exists():
+        return False, (409, '试卷已有作答记录，无法修改')
+
+    current = _review_question(question)
+    if current['revision'] != changes['revision']:
+        return False, (409, '题目内容已更新，请重新打开试卷后再修改')
+
+    options = changes.get('options')
+    answer = changes.get('correct_answer')
+    if options is not None or answer is not None:
+        question_type = question.question_type
+        if question_type not in OBJECTIVE_TYPES:
+            return False, (400, '只有客观题可以修改选项和正确答案')
+
+        allowed = set('AB' if question_type == 'judge' else 'ABCD')
+        effective_options = options if options is not None else _parse_options(question.options) or {}
+        if options is not None and (len(options) < 2 or not options.keys() <= allowed):
+            return False, (400, '请提供至少两个有效选项')
+
+        raw_answer = answer if answer is not None else question.correct_answer or ''
+        if question_type == 'multi':
+            labels = _normalize_multi_answer(raw_answer).split(',')
+        else:
+            labels = [raw_answer.strip().upper()]
+        if len(set(labels)) != len(labels) or any(
+            label not in allowed or not effective_options.get(label) for label in labels
+        ):
+            return False, (400, '正确答案必须对应有内容的选项')
+
+    updates = {}
+    if 'title' in changes:
+        updates['question_text'] = changes['title']
+    if options is not None:
+        updates['options'] = options
+    if answer is not None:
+        updates['correct_answer'] = ','.join(labels)
+    for field, value in updates.items():
+        setattr(question, field, value)
+    question.save(update_fields=updates)
+
+    from apps.system.services import _write_log
+    transaction.on_commit(lambda: _write_log(
+        operator_id, '考试管理', '修改试卷题目', str(paper_id), f'题目ID={question_id}',
+    ))
+    return True, _review_question(question)
+
+
 def get_paper_review(paper_id, viewer):
     """
     超管试卷检查：返回指定考生的完整试卷内容（不含答案回填）
@@ -1487,17 +1587,11 @@ def get_paper_review(paper_id, viewer):
 
     # 2. 获取试卷记录
     try:
-        paper = ExamPaper.objects.get(id=paper_id)
+        paper = ExamPaper.objects.select_related('exam', 'user').get(id=paper_id)
     except ExamPaper.DoesNotExist:
         return False, (404, "试卷不存在")
 
-    # 3. 获取考生基本信息
-    from django.contrib.auth import get_user_model
-    User = get_user_model()
-    try:
-        exam_user = User.objects.get(id=paper.user_id)
-    except User.DoesNotExist:
-        return False, (404, "考生不存在")
+    exam_user = paper.user
 
     # 4. 读取出题模式
     config = paper.exam.question_config if isinstance(paper.exam.question_config, dict) else {}
@@ -1521,6 +1615,9 @@ def get_paper_review(paper_id, viewer):
         'paper_id': paper.id,
         'teacher_name': exam_user.display_name or exam_user.username,
         'teacher_gh': exam_user.username,
+        'can_edit': _paper_editable(paper) and not ExamAnswer.objects.filter(
+            question__in=questions_qs.order_by(),
+        ).exists(),
     }
 
     # 6. by_student 模式：按学生分组
@@ -1534,22 +1631,11 @@ def get_paper_review(paper_id, viewer):
                     'student_name': q.student.name if q.student_id else '未知',
                     'questions': [],
                 }
-            if q.question_type == 'essay':
-                correct_answer = _build_essay_reference_answer(q)
-            else:
-                correct_answer = q.correct_answer or ''
-            item = {
-                'question_id': q.id,
-                'title': q.question_text,
-                'question_type': q.question_type,
-                'correct_answer': correct_answer,
-                'sort_order': q.student_sort_order or 0,
-            }
-            if q.options:
-                item['options'] = _parse_options(q.options)
+            item = _review_question(q)
+            item['sort_order'] = q.student_sort_order or 0
             groups[sid]['questions'].append(item)
 
-        question_groups = sorted(groups.values(), key=lambda g: g['student_xid'])
+        question_groups = sorted(groups.values(), key=lambda g: (g['student_xid'] is None, g['student_xid']))
         return True, {
             **base_result,
             'generate_mode': 'by_student',
@@ -1557,23 +1643,7 @@ def get_paper_review(paper_id, viewer):
         }
 
     # 7. by_type 模式：扁平列表
-    questions = []
-    for q in questions_qs:
-        if q.question_type == 'essay':
-            correct_answer = _build_essay_reference_answer(q)
-        else:
-            correct_answer = q.correct_answer or ''
-        item = {
-            'question_id': q.id,
-            'title': q.question_text,
-            'question_type': q.question_type,
-            'correct_answer': correct_answer,
-        }
-        if q.options:
-            item['options'] = _parse_options(q.options)
-        questions.append(item)
-
-    return True, {**base_result, 'questions': questions}
+    return True, {**base_result, 'questions': [_review_question(q) for q in questions_qs]}
 
 
 def _trigger_ai_grading_if_enabled(exam):
@@ -1642,7 +1712,7 @@ def preload_exam_images(paper_id, user_id, viewer_role=None):
             return False, (4032, "不在预加载时间内，请在考试开始前10分钟内入场预加载")
 
     # 3. 遍历该试卷所有题目，从 options 中收集图片路径
-    media_root = str(settings.STUDENT_PHOTO_DIR)
+    media_root = Path(settings.STUDENT_PHOTO_DIR).resolve()
     # 学生照片实际存放在 STUDENT_PHOTO_DIR，不经过 MEDIA_ROOT
     photo_url_prefix = settings.MEDIA_URL + 'students_photo/'
     questions = ExamQuestion.objects.filter(
@@ -1652,8 +1722,8 @@ def preload_exam_images(paper_id, user_id, viewer_role=None):
 
     images = []
     for q in questions:
-        options = q.options
-        if not isinstance(options, dict):
+        options = _parse_options(q.options)
+        if not options:
             continue
 
         for option_key, option_value in options.items():
@@ -1664,9 +1734,12 @@ def preload_exam_images(paper_id, user_id, viewer_role=None):
 
             # 选项中存储的是完整 URL 路径（如 /media/students_photo/xxx.jpg）
             # 需要提取相对于 STUDENT_PHOTO_DIR 的文件名部分
-            relative_path = value_str.replace(photo_url_prefix, '', 1)
-            file_path = os.path.join(media_root, relative_path)
-            if not os.path.isfile(file_path):
+            relative_path = value_str.removeprefix(photo_url_prefix)
+            try:
+                file_path = (media_root / relative_path).resolve()
+                if not file_path.is_relative_to(media_root) or not file_path.is_file():
+                    continue
+            except (OSError, ValueError, RuntimeError):
                 continue
 
             # 获取文件扩展名和对应 MIME 类型
@@ -1683,6 +1756,7 @@ def preload_exam_images(paper_id, user_id, viewer_role=None):
                 images.append({
                     'question_id': q.id,
                     'option_key': option_key,
+                    'source': value_str,
                     'filename': filename,
                     'mime_type': mime_type,
                     'base64': b64_data,

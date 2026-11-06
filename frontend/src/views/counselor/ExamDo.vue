@@ -297,7 +297,7 @@ function getQuestionTypeText(type) {
  */
 function getOptionImageUrl(path, questionId, optionKey) {
   // 尝试从缓存中获取Blob URL
-  const cachedUrl = examStore.getCachedImage(questionId, optionKey)
+  const cachedUrl = examStore.getCachedImage(questionId, optionKey, path)
   if (cachedUrl) {
     return cachedUrl // 返回预加载的Blob URL
   }
@@ -397,7 +397,6 @@ onMounted(async () => {
 
     if (response.code === 200) {
       paperId.value = response.paper_id
-      // 图片预加载已在考前等待页面完成，store 内已做去重，此处不再重复调用
       // 转换字段名以匹配组件期望
       // 兼容 by_student 模式：question_groups 按学生分组，扁平化为统一 questions 数组
       let rawQuestions = []
@@ -413,6 +412,16 @@ onMounted(async () => {
         q.content = q.title
         return q
       })
+
+      // 考前预加载之后如果替换了照片，按开考时的试卷补载。
+      const hasUncachedImage = rawQuestions.some((question) =>
+        Object.entries(question.options || {}).some(([key, value]) =>
+          isImagePath(value) && !examStore.getCachedImage(question.question_id, key, value),
+        ),
+      )
+      if (hasUncachedImage) {
+        await examStore.preloadExamImages(paperId.value, true)
+      }
 
       // 恢复已保存的答案
       if (paperId.value) {
@@ -434,10 +443,9 @@ onMounted(async () => {
                 if (
                   question &&
                   question.question_type === 'multi' &&
-                  typeof answer === 'string' &&
-                  answer.includes(',')
+                  typeof answer === 'string'
                 ) {
-                  restoredAnswers[questionNumber] = answer.split(',')
+                  restoredAnswers[questionNumber] = answer ? answer.split(',') : []
                 } else {
                   restoredAnswers[questionNumber] = answer
                 }

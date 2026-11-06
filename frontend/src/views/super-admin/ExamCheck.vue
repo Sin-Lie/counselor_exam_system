@@ -3,7 +3,7 @@
     <div class="page-header">
       <div class="header-left">
         <h1>试卷检查</h1>
-        <p>试卷生成后、考试开考前，检查任意考生的试卷是否生成正确</p>
+        <p>查看考生试卷，并在开考前修改需要纠正的题目</p>
       </div>
       <div class="header-right">
         <el-button @click="handleBack" class="back-button">
@@ -35,7 +35,7 @@
               <el-icon :size="16"><Download /></el-icon>
               导出学生信息
             </el-button>
-            <el-button type="primary" @click="loadExamList" class="refresh-btn">
+            <el-button type="primary" @click="loadExamList" :loading="loadingExams" class="refresh-btn">
               <el-icon :size="16"><Refresh /></el-icon>
               刷新
             </el-button>
@@ -80,7 +80,7 @@
       </div>
 
       <el-card class="paper-list-card">
-        <el-table :data="paperList" border>
+        <el-table v-loading="loadingPapers" :data="paperList" border>
           <el-table-column prop="teacher_name" label="考生姓名" />
           <el-table-column prop="teacher_gh" label="工号" />
           <el-table-column prop="submit_time" label="交卷时间">
@@ -90,14 +90,20 @@
           </el-table-column>
           <el-table-column prop="status" label="状态">
             <template #default="scope">
-              <el-tag :type="getEffectiveStatus(scope.row) === 'graded' ? 'success' : 'warning'">
-                {{ getEffectiveStatus(scope.row) === 'graded' ? '已批改' : '未批改' }}
+              <el-tag :type="paperStatuses[scope.row.status]?.type || 'info'">
+                {{ paperStatuses[scope.row.status]?.text || '未知' }}
               </el-tag>
             </template>
           </el-table-column>
           <el-table-column label="操作" width="120">
             <template #default="scope">
-              <el-button size="small" type="primary" @click="viewPaper(scope.row)">
+              <el-button
+                size="small"
+                type="primary"
+                :loading="openingPaperId === scope.row.paper_id"
+                :disabled="openingPaperId !== null"
+                @click="viewPaper(scope.row)"
+              >
                 查看试卷
               </el-button>
             </template>
@@ -121,12 +127,21 @@
       <p>请先选择考试</p>
     </div>
 
-    <el-dialog v-model="showPaperDialog" title="试卷详情" width="900px">
+    <el-dialog
+      v-model="showPaperDialog"
+      title="试卷详情"
+      width="min(900px, 96vw)"
+      :close-on-click-modal="false"
+      :close-on-press-escape="!savingQuestion"
+      :show-close="!savingQuestion"
+      @closed="editDraft = null"
+    >
       <div v-if="selectedPaper" class="paper-content">
         <div class="paper-header">
           <h3>{{ selectedExam?.exam_name || '试卷详情' }}</h3>
           <p>考生：{{ selectedPaper.teacher_name }} ({{ selectedPaper.teacher_gh }})</p>
           <p v-if="selectedPaper.submit_time">交卷时间：{{ selectedPaper.submit_time }}</p>
+          <p>{{ selectedPaper.can_edit ? '开考前可逐题修改，保存后仅影响该考生。' : '当前试卷仅供查看。' }}</p>
         </div>
 
         <el-divider />
@@ -140,9 +155,21 @@
             <div class="question-title">
               <span class="question-num">题{{ index + 1 }}</span>
               <span class="question-type">({{ getQuestionTypeText(question.question_type) }})</span>
+              <span class="question-type">{{ question.score }} 分</span>
+              <el-button
+                v-if="selectedPaper.can_edit"
+                class="edit-question-button"
+                size="small"
+                type="primary"
+                plain
+                :disabled="editDraft !== null"
+                @click="beginQuestionEdit(question)"
+              >
+                编辑第 {{ index + 1 }} 题
+              </el-button>
               <!-- 正确答案标签 -->
               <el-tag
-                v-if="question.correct_answer"
+                v-if="question.correct_answer && question.question_type !== 'essay'"
                 type="success"
                 size="small"
                 class="correct-tag"
@@ -150,60 +177,94 @@
                 正确答案：{{ formatCorrectAnswer(question) }}
               </el-tag>
             </div>
-            <div class="question-content">{{ question.title }}</div>
-
-            <!-- 选择题/判断题选项区：正确答案标绿 -->
-            <div class="options-section" v-if="question.options">
-              <div
-                class="option-item"
-                v-for="(opt, optKey) in question.options"
-                :key="optKey"
-                :class="{
-                  'correct-option': isCorrectOption(question, optKey),
-                  'option-item-image': isImagePath(opt),
-                }"
-              >
-                <span class="option-key">{{ optKey }}:</span>
-                <!-- 图片选项：显示实际图片 -->
-                <img
-                  v-if="isImagePath(opt)"
-                  :src="getImageUrl(opt, question.question_id, optKey)"
-                  class="option-image"
-                  :alt="'选项' + optKey + '图片'"
-                />
-                <!-- 文本选项：直接显示文字 -->
-                <span v-else class="option-value">{{ opt }}</span>
-                <el-icon v-if="isCorrectOption(question, optKey)" class="correct-icon" :size="18">
-                  <svg viewBox="0 0 24 24" fill="currentColor">
-                    <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z" />
-                  </svg>
-                </el-icon>
-              </div>
-            </div>
-
-            <!-- 问答题正确答案区域 -->
-            <div
-              v-if="question.question_type === 'essay' && question.correct_answer"
-              class="correct-answer-section"
+            <el-form
+              v-if="editDraft?.questionId === question.question_id"
+              label-position="top"
+              :disabled="savingQuestion"
+              @submit.prevent="saveQuestion(question)"
             >
-              <div class="correct-answer-title">正确答案：</div>
-              <div class="correct-answer-content">
-                <template v-if="typeof question.correct_answer === 'object'">
-                  <div v-for="(val, key) in question.correct_answer" :key="key" class="answer-row">
-                    <span class="answer-label">{{ key }}：</span>
-                    <span class="answer-value">{{ val || '无' }}</span>
-                  </div>
-                </template>
-                <template v-else>
-                  {{ question.correct_answer }}
-                </template>
+              <el-form-item label="题干">
+                <el-input v-model="editDraft.title" type="textarea" :rows="3" maxlength="2000" />
+              </el-form-item>
+              <template v-if="editDraft.options">
+                <el-form-item v-for="key in Object.keys(editDraft.options)" :key="key" :label="'选项 ' + key">
+                  <el-input v-model="editDraft.options[key]" type="textarea" autosize maxlength="2000" />
+                </el-form-item>
+                <el-form-item label="正确答案">
+                  <el-select v-model="editDraft.answer" :multiple="question.question_type === 'multi'">
+                    <el-option
+                      v-for="key in Object.keys(editDraft.options)"
+                      :key="key"
+                      :label="key"
+                      :value="key"
+                      :disabled="!editDraft.options[key].trim()"
+                    />
+                  </el-select>
+                </el-form-item>
+              </template>
+              <el-form-item>
+                <el-button type="primary" native-type="submit" :loading="savingQuestion">
+                  保存题目
+                </el-button>
+                <el-button @click="editDraft = null">取消编辑</el-button>
+              </el-form-item>
+            </el-form>
+            <template v-else>
+              <div class="question-content">{{ question.title }}</div>
+
+              <!-- 选择题/判断题选项区：正确答案标绿 -->
+              <div class="options-section" v-if="question.options">
+                <div
+                  class="option-item"
+                  v-for="(opt, optKey) in question.options"
+                  :key="optKey"
+                  :class="{
+                    'correct-option': isCorrectOption(question, optKey),
+                    'option-item-image': isImagePath(opt),
+                  }"
+                >
+                  <span class="option-key">{{ optKey }}:</span>
+                  <!-- 图片选项：显示实际图片 -->
+                  <img
+                    v-if="isImagePath(opt)"
+                    :src="getImageUrl(opt, question.question_id, optKey)"
+                    class="option-image"
+                    :alt="'选项' + optKey + '图片'"
+                  />
+                  <!-- 文本选项：直接显示文字 -->
+                  <span v-else class="option-value">{{ opt }}</span>
+                  <el-icon v-if="isCorrectOption(question, optKey)" class="correct-icon" :size="18">
+                    <svg viewBox="0 0 24 24" fill="currentColor">
+                      <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z" />
+                    </svg>
+                  </el-icon>
+                </div>
               </div>
-            </div>
+
+              <!-- 问答题正确答案区域 -->
+              <div
+                v-if="question.question_type === 'essay' && question.correct_answer"
+                class="correct-answer-section"
+              >
+                <div class="correct-answer-title">正确答案：</div>
+                <div class="correct-answer-content">
+                  <template v-if="typeof question.correct_answer === 'object'">
+                    <div v-for="(val, key) in question.correct_answer" :key="key" class="answer-row">
+                      <span class="answer-label">{{ key }}：</span>
+                      <span class="answer-value">{{ val || '无' }}</span>
+                    </div>
+                  </template>
+                  <template v-else>
+                    {{ question.correct_answer }}
+                  </template>
+                </div>
+              </div>
+            </template>
           </div>
         </div>
       </div>
       <template #footer>
-        <el-button @click="showPaperDialog = false">关闭</el-button>
+        <el-button :disabled="savingQuestion" @click="showPaperDialog = false">关闭</el-button>
       </template>
     </el-dialog>
   </div>
@@ -215,7 +276,7 @@ import { useRouter } from 'vue-router'
 import { ArrowLeft, Refresh, Document, Download } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { getExamList } from '@/api/system'
-import { getPaperReview, getExamUserStatus, exportExamStudents } from '@/api/exam'
+import { getPaperReview, updatePaperQuestion, getExamUserStatus, exportExamStudents } from '@/api/exam'
 import { useExamStore } from '@/stores/exam'
 
 const router = useRouter()
@@ -229,26 +290,41 @@ const paperList = ref([])
 const currentPage = ref(1)
 const pageSize = ref(10)
 const total = ref(0)
+const loadingPapers = ref(false)
+let paperListRequest = 0
+
+const paperStatuses = {
+  not_started: { text: '未开始', type: 'info' },
+  normal: { text: '进行中', type: 'primary' },
+  submitted: { text: '已交卷', type: 'warning' },
+  graded: { text: '已批改', type: 'success' },
+}
 
 const showPaperDialog = ref(false)
 const selectedPaper = ref(null)
+const openingPaperId = ref(null)
+const editDraft = ref(null)
+const savingQuestion = ref(false)
+const loadingExams = ref(false)
 
 async function loadExamList() {
+  loadingExams.value = true
   try {
-    const res = await getExamList({ page: 1, size: 50 })
-    console.log('考试列表接口返回:', res)
-
-    if (res && res.list) {
-      examList.value = res.list
-      if (examList.value.length > 0 && !selectedExamId.value) {
-        selectedExamId.value = examList.value[0].exam_id
-      }
-    } else {
-      ElMessage.warning('暂无考试数据')
+    const first = await getExamList({ page: 1, size: 50 })
+    const exams = [...first.list]
+    for (let page = 2; page <= first.pages; page++) {
+      const next = await getExamList({ page, size: 50 })
+      exams.push(...next.list)
     }
-  } catch (error) {
-    console.error('获取考试列表失败详情:', error)
-    ElMessage.error('获取考试列表失败：' + (error.message || '请检查后端服务或登录状态'))
+    examList.value = exams
+    if (!exams.some((exam) => exam.exam_id === selectedExamId.value)) {
+      selectedExamId.value = exams[0]?.exam_id || ''
+    }
+    await handleExamChange()
+  } catch {
+    // 请求层已显示错误。
+  } finally {
+    loadingExams.value = false
   }
 }
 
@@ -296,78 +372,124 @@ async function handleExamChange() {
   total.value = 0
   if (selectedExamId.value) {
     await loadPaperList()
+  } else {
+    paperListRequest++
+    loadingPapers.value = false
   }
 }
 
 async function loadPaperList() {
+  const requestId = ++paperListRequest
+  loadingPapers.value = true
   try {
     const res = await getExamUserStatus(selectedExamId.value, {
       page: currentPage.value,
       size: pageSize.value,
     })
-    console.log('试卷列表接口返回:', res)
-
-    if (res && res.list) {
+    if (requestId === paperListRequest) {
       paperList.value = res.list
-      total.value = res.total || 0
-    } else {
-      paperList.value = []
-      total.value = 0
-      ElMessage.warning('暂无试卷数据')
+      total.value = res.total
     }
-  } catch (error) {
-    console.error('获取试卷列表失败:', error)
-    ElMessage.error('获取试卷列表失败')
+  } catch {
+    // 请求层已显示错误。
+  } finally {
+    if (requestId === paperListRequest) loadingPapers.value = false
   }
 }
 
 async function viewPaper(row) {
+  const examId = selectedExamId.value
+  openingPaperId.value = row.paper_id
   try {
-    // 调用试卷检查接口，请求拦截器已扁平化返回数据（res.data 展开到顶层）
     const res = await getPaperReview(row.paper_id)
-    console.log('试卷详情接口返回:', res)
-    if (res.code === 200) {
-      // 兼容 by_student 模式：question_groups 扁平化为 questions 数组
-      let flatQuestions = []
-      if (res.question_groups && res.question_groups.length > 0) {
-        flatQuestions = res.question_groups.flatMap(function (group) {
-          return group.questions || []
-        })
-      } else {
-        flatQuestions = res.questions || []
-      }
-      // 请求拦截器已将 { code, msg, data: {...} } 展开为 { code, msg, paper_id, teacher_name, questions, ... }
-      // 直接展开 res 即可获取 questions 和 correct_answer
-      selectedPaper.value = {
-        ...row,
-        ...res,
-        questions: flatQuestions,
-      }
-
-      // 预加载试卷中的图片，将 base64 解码后缓存为 Blob URL
-      // 复用考生考试相同的预加载机制，确保学生照片能正常显示
-      const paperId = res.paper_id || row.paper_id
-      if (paperId) {
-        await examStore.preloadExamImages(paperId)
-      }
-    } else {
-      ElMessage.error(res.msg || '获取试卷详情失败')
-      selectedPaper.value = row
+    const questions = res.question_groups?.flatMap((group) => group.questions) || res.questions || []
+    const missingImage = questions.some((question) =>
+      Object.entries(question.options || {}).some(([key, value]) =>
+        isImagePath(value) && !examStore.getCachedImage(question.question_id, key, value),
+      ),
+    )
+    if (missingImage) await examStore.preloadExamImages(row.paper_id, true)
+    if (examId === selectedExamId.value) {
+      editDraft.value = null
+      selectedPaper.value = { ...row, ...res, questions }
+      showPaperDialog.value = true
     }
-  } catch (error) {
-    console.error('获取试卷详情失败:', error)
-    ElMessage.error('获取试卷详情失败')
-    selectedPaper.value = row
+  } catch {
+    // 请求层已显示错误。
+  } finally {
+    openingPaperId.value = null
   }
-  showPaperDialog.value = true
+}
+
+function beginQuestionEdit(question) {
+  const isObjective = ['single', 'multi', 'judge'].includes(question.question_type)
+  const defaultKeys = question.question_type === 'judge' ? ['A', 'B'] : ['A', 'B', 'C', 'D']
+  const options = question.options || Object.fromEntries(defaultKeys.map((key) => [key, '']))
+  editDraft.value = {
+    questionId: question.question_id,
+    title: question.title,
+    options: isObjective ? { ...options } : null,
+    answer: question.question_type === 'multi'
+      ? normalizeAnswerList(question.correct_answer)
+      : String(question.correct_answer || '').trim().toUpperCase(),
+  }
+}
+
+async function saveQuestion(question) {
+  if (savingQuestion.value) return
+  const draft = editDraft.value
+  const title = draft.title.trim()
+  if (!title) {
+    ElMessage.warning('请填写题干')
+    return
+  }
+
+  const data = { revision: question.revision }
+  if (title !== question.title) data.title = title
+  if (draft.options) {
+    const optionEntries = Object.entries(draft.options)
+    if (optionEntries.some(([key, value]) => value !== (question.options?.[key] ?? ''))) {
+      data.options = draft.options
+    }
+    const answer = Array.isArray(draft.answer) ? [...draft.answer].sort().join(',') : draft.answer
+    const originalAnswer = question.question_type === 'multi'
+      ? normalizeAnswerList(question.correct_answer).sort().join(',')
+      : String(question.correct_answer || '').trim().toUpperCase()
+    if (answer !== originalAnswer) data.correct_answer = answer
+    if ((data.options || data.correct_answer !== undefined) && !answer) {
+      ElMessage.warning('请选择正确答案')
+      return
+    }
+  }
+  if (Object.keys(data).length === 1) {
+    editDraft.value = null
+    return
+  }
+
+  savingQuestion.value = true
+  try {
+    const result = await updatePaperQuestion(selectedPaper.value.paper_id, question.question_id, data)
+    Object.assign(question, result)
+    editDraft.value = null
+    ElMessage.success('题目已保存')
+    if (data.options && Object.values(result.options || {}).some(isImagePath)) {
+      await examStore.preloadExamImages(selectedPaper.value.paper_id, true)
+    }
+  } catch {
+    // 保留草稿，便于修正后重试。
+  } finally {
+    savingQuestion.value = false
+  }
 }
 
 function handleSizeChange(val) {
   pageSize.value = val
+  currentPage.value = 1
   loadPaperList()
 }
 
 function handleCurrentChange(val) {
+  if (val === currentPage.value) return
   currentPage.value = val
   loadPaperList()
 }
@@ -390,17 +512,6 @@ function getExamStatusText(status) {
     closed: '已关闭',
   }
   return textMap[status] || status
-}
-
-/**
- * 获取考生的有效状态
- * 如果 score 字段有值（数字），说明已批改，即使 status 不是 'graded' 也按已批改处理
- */
-function getEffectiveStatus(row) {
-  if (row.score !== null && row.score !== undefined && row.score !== '') {
-    return 'graded'
-  }
-  return row.status
 }
 
 function getQuestionTypeText(type) {
@@ -442,7 +553,7 @@ function getImageUrl(path, questionId, optionKey) {
   if (!path) return '' // 空路径
   // 优先使用预加载缓存的 Blob URL
   if (questionId && optionKey) {
-    const cachedUrl = examStore.getCachedImage(questionId, optionKey)
+    const cachedUrl = examStore.getCachedImage(questionId, optionKey, path)
     if (cachedUrl) {
       return cachedUrl
     }
@@ -457,7 +568,7 @@ function normalizeAnswerList(answer) {
   if (Array.isArray(answer)) {
     return answer.map((item) => String(item).trim()).filter(Boolean)
   }
-  const raw = String(answer || '').replace(/，/g, ',').trim()
+  const raw = String(answer || '').replace(/，/g, ',').trim().toUpperCase()
   if (!raw) return []
   if (raw.includes(',')) {
     return raw
@@ -475,17 +586,13 @@ function isCorrectOption(question, optKey) {
     return normalizeAnswerList(answer).includes(String(optKey))
   }
   // 单选/判断题：直接匹配
-  return String(answer) === String(optKey)
+  return String(answer).trim().toUpperCase() === String(optKey)
 }
 
 // ==================== 格式化显示正确答案 ====================
 function formatCorrectAnswer(question) {
   const answer = question.correct_answer
   if (!answer) return ''
-  if (question.question_type === 'essay') {
-    // 问答题：显示"见下方详情"
-    return '见下方详情'
-  }
   if (Array.isArray(answer)) {
     // 数组格式拼接
     return answer.join('、')
@@ -657,10 +764,15 @@ loadExamList()
 
 .question-title {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   margin-bottom: 12px;
   font-weight: 600;
+}
+
+.edit-question-button {
+  margin-left: auto;
 }
 
 .question-num {

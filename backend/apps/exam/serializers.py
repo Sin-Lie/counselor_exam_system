@@ -46,6 +46,21 @@ class QuestionSerializer(serializers.Serializer):
     user_answer = serializers.CharField(allow_null=True, required=False)
 
 
+class PaperQuestionEditSerializer(serializers.Serializer):
+    revision = serializers.RegexField(r'^[0-9a-f]{64}$')
+    title = serializers.CharField(max_length=2000, required=False)
+    options = serializers.DictField(
+        child=serializers.CharField(allow_blank=True, max_length=2000),
+        required=False,
+    )
+    correct_answer = serializers.CharField(max_length=500, required=False)
+
+    def validate(self, attrs):
+        if len(attrs) == 1:
+            raise serializers.ValidationError('请提供要修改的内容')
+        return attrs
+
+
 class SavedAnswersSerializer(serializers.Serializer):
     """
     已保存答案序列化器（输出用）

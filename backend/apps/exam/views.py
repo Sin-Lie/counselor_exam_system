@@ -14,6 +14,7 @@ from .services import (
     submit_exam,
     report_abnormal,
     get_paper_review,
+    edit_paper_question,
     preload_exam_images,
 )
 from .serializers import (
@@ -23,6 +24,7 @@ from .serializers import (
     SavedAnswersSerializer,
     SaveAnswerSerializer,
     ReportAbnormalSerializer,
+    PaperQuestionEditSerializer,
 )
 from utils.response import (
     ApiResponseSuccess,
@@ -312,6 +314,25 @@ class PaperReviewView(APIView):
             return ApiResponseError(code=code, msg=msg)
 
         return ApiResponseSuccess(data=result, msg='查询成功')
+
+
+class PaperQuestionEditView(APIView):
+    """超级管理员修改指定考生试卷中的一道题。"""
+
+    permission_classes = [IsSuperAdmin]
+
+    def patch(self, request, paper_id, question_id):
+        serializer = PaperQuestionEditSerializer(data=request.data)
+        if not serializer.is_valid():
+            return ApiResponseError(msg='题目修改参数无效', data=serializer.errors)
+
+        success, result = edit_paper_question(
+            paper_id, question_id, request.user.id, serializer.validated_data,
+        )
+        if not success:
+            code, msg = result
+            return ApiResponseError(code=code, msg=msg)
+        return ApiResponseSuccess(data=result, msg='题目已保存')
 
 
 class PreloadImagesView(APIView):
